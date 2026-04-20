@@ -49,14 +49,10 @@ if (!compileAll) {
 }
 
 for (const { target, output } of targetsToCompile) {
-  const outputPath = path.join(root, 'build', output);
   console.log(`[compile] ${target} → build/${output}`);
-
-  await $`npx pkg \
-    dist/index.js \
-    --target ${target} \
-    --output ${outputPath} \
-    --compress GZip`;
+  // Use a relative path to avoid backslash-in-template-string issues on Windows.
+  // cd(root) above ensures the CWD is always the repo root.
+  await $`npx pkg dist/index.js --target ${target} --output build/${output} --compress GZip`;
 }
 
 // macOS universal binary via lipo (only on macOS with both arches compiled)

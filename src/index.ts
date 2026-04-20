@@ -2,9 +2,12 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Command } from 'commander';
+import createDebug from 'debug';
 import { BrowserManager } from './browser';
 import { findChromeBrowser } from './chrome/FindChrome';
 import { startProxy } from './proxy';
+
+const log = createDebug('boomer:cli');
 
 const pkg = require('../package.json') as { name: string; version: string; description: string };
 
@@ -25,8 +28,12 @@ async function main() {
       'directory for SSL CA certificates',
       path.join(os.homedir(), '.boomer-bypass')
     )
-    .option('--ca-cert <path>', 'path to existing CA certificate file')
-    .option('--ca-key <path>', 'path to existing CA key file')
+    .option('--ca-cert <path>', 'path to an existing PEM CA certificate file')
+    .option('--ca-key <path>', 'path to the matching PEM CA private key file')
+    .option(
+      '--ca-public-key <path>',
+      'path to the PEM CA public key file (default: derived from --ca-key path)'
+    )
     .option('-v, --verbose', 'enable verbose logging');
 
   program.parse(process.argv);
@@ -38,36 +45,43 @@ async function main() {
     sslCaDir: string;
     caCert?: string;
     caKey?: string;
+    caPublicKey?: string;
     verbose?: boolean;
   }>();
 
   const port = Number.parseInt(opts.port, 10);
   if (Number.isNaN(port) || port < 0 || port > 65535) {
-    console.error(`[boomer-bypass] Invalid port: ${opts.port}`);
+    process.stderr.write(`[boomer] Invalid port: ${opts.port}\n`);
     process.exit(1);
   }
 
   // Find Chrome
   let chromePath = opts.chromePath;
   if (!chromePath) {
-    console.log('[boomer-bypass] Searching for Chrome/Chromium...');
+    log('searching for Chrome/Chromium...');
     chromePath = (await findChromeBrowser()) ?? undefined;
   }
 
   if (!chromePath) {
-    console.error(
-      '[boomer-bypass] No Chrome/Chromium installation found.\n' +
+    process.stderr.write(
+      '[boomer] No Chrome/Chromium installation found.\n' +
         'Install Google Chrome, Chromium, Microsoft Edge, or Brave,\n' +
-        'or specify the path with --chrome-path.'
+        'or specify the path with --chrome-path.\n'
     );
     process.exit(1);
   }
 
-  console.log(`[boomer-bypass] Using Chrome: ${chromePath}`);
+  log('using Chrome at %s', chromePath);
 
   // Launch browser
   const browser = new BrowserManager(chromePath, opts.headless !== false);
   await browser.launch();
+
+  // Validate custom CA cert/key — both must be provided together
+  if (!!opts.caCert !== !!opts.caKey) {
+    process.stderr.write('[boomer] --ca-cert and --ca-key must be provided together.\n');
+    process.exit(1);
+  }
 
   // Start proxy
   const sslCaDir = opts.sslCaDir;
@@ -76,29 +90,33 @@ async function main() {
     host: opts.host,
     sslCaDir,
     browser,
+    caCert: opts.caCert,
+    caKey: opts.caKey,
+    caPublicKey: opts.caPublicKey,
     verbose: opts.verbose
   });
 
   const caCertPath = proxy.getCaCertPath();
-  console.log(`[boomer-bypass] Proxy listening on http://${opts.host}:${port}`);
-  console.log(`[boomer-bypass] CA certificate: ${caCertPath}`);
-  console.log('');
-  console.log('[boomer-bypass] To trust the CA certificate:');
-  console.log(
-    `  macOS:   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ${caCertPath}`
+  process.stdout.write(`[boomer] Proxy listening on http://${opts.host}:${port}\n`);
+  process.stdout.write(`[boomer] CA certificate: ${caCertPath}\n`);
+  process.stdout.write('\n');
+  process.stdout.write('[boomer] To trust the CA certificate:\n');
+  process.stdout.write(
+    `  macOS:   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ${caCertPath}\n`
   );
-  console.log(
-    `  Linux:   sudo cp ${caCertPath} /usr/local/share/ca-certificates/boomer-bypass.crt && sudo update-ca-certificates`
+  process.stdout.write(
+    `  Linux:   sudo cp ${caCertPath} /usr/local/share/ca-certificates/boomer.crt && sudo update-ca-certificates\n`
   );
-  console.log(`  Windows: certutil -addstore Root ${caCertPath}`);
-  console.log('');
-  console.log(
-    '[boomer-bypass] Configure your browser/app to use this proxy, then browse normally.'
+  process.stdout.write(`  Windows: certutil -addstore Root ${caCertPath}\n`);
+  process.stdout.write('\n');
+  process.stdout.write(
+    '[boomer] Configure your browser/app to use this proxy, then browse normally.\n'
   );
 
   // Graceful shutdown
   const shutdown = async () => {
-    console.log('\n[boomer-bypass] Shutting down...');
+    process.stdout.write('\n[boomer] Shutting down...\n');
+    log('shutdown signal received');
     proxy.close();
     await browser.close();
     process.exit(0);
@@ -109,6 +127,7 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error('[boomer-bypass] Fatal error:', err);
+  log('fatal error: %O', err);
+  process.stderr.write(`[boomer] Fatal error: ${err}\n`);
   process.exit(1);
 });

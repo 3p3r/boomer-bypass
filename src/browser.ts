@@ -1,4 +1,9 @@
+import createDebug from 'debug';
 import * as puppeteer from 'puppeteer-core';
+
+const log = createDebug('boomer:browser');
+const logPool = createDebug('boomer:browser:pool');
+const logFetch = createDebug('boomer:browser:fetch');
 
 export interface RequestOpts {
   url: string;
@@ -32,6 +37,7 @@ export class BrowserManager {
   }
 
   async launch(): Promise<void> {
+    log('launching Chrome at %s (headless=%s)', this.chromePath, this.headless);
     this.launching = true;
     try {
       this.browser = await puppeteer.launch({
@@ -43,24 +49,27 @@ export class BrowserManager {
           '--disable-features=IsolateOrigins,site-per-process',
           '--no-sandbox',
           '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage'
+          '--disable-dev-shm-usage',
+          // Trust self-signed certs on localhost — common for local dev HTTPS servers
+          '--allow-insecure-localhost'
         ]
       });
 
       this.browser.on('disconnected', () => {
+        log('Chrome disconnected — restarting in 1 s');
         this.browser = null;
         this.pool = [];
-        // Auto-restart
         setTimeout(() => {
           this.launch().catch(err => {
             /* c8 ignore next */
-            console.error('[boomer-bypass] Browser restart failed:', err);
+            log('browser restart failed: %O', err);
           });
         }, 1000);
       });
 
       // Pre-create worker pages
       await Promise.all(Array.from({ length: POOL_SIZE }, () => this.createWorkerPage()));
+      log('browser ready, pool size %d', this.pool.length);
     } finally {
       this.launching = false;
       const waiters = this.launchWaiters.splice(0);
@@ -75,16 +84,18 @@ export class BrowserManager {
     // Navigate to blank
     await page.goto('about:blank');
 
-    // Suppress console errors from worker pages
-    page.on('console', () => {});
-    page.on('pageerror', () => {});
+    // Suppress console noise from worker pages in non-debug mode
+    page.on('console', msg => logPool('page console [%s] %s', msg.type(), msg.text()));
+    page.on('pageerror', err => logPool('page error: %O', err));
 
     this.pool.push({ page, busy: false });
+    logPool('worker page created (pool size now %d)', this.pool.length);
   }
 
   private async acquirePage(): Promise<WorkerPage> {
     // Wait for browser to be ready
     while (this.launching) {
+      logPool('waiting for browser launch...');
       await new Promise<void>(resolve => {
         this.launchWaiters.push(resolve);
       });
@@ -94,15 +105,18 @@ export class BrowserManager {
     const free = this.pool.find(p => !p.busy);
     if (free) {
       free.busy = true;
+      logPool('acquired free page immediately');
       return free;
     }
 
     // All pages busy — wait for one to become free
+    logPool('all %d pages busy — queuing', this.pool.length);
     return new Promise(resolve => {
       const check = () => {
         const available = this.pool.find(p => !p.busy);
         if (available) {
           available.busy = true;
+          logPool('acquired previously-busy page');
           resolve(available);
         } else {
           setImmediate(check);
@@ -117,34 +131,27 @@ export class BrowserManager {
   }
 
   async fetch(opts: RequestOpts, onStart: OnStartFn, onChunk: OnChunkFn): Promise<void> {
+    logFetch('%s %s', opts.method, opts.url);
     const worker = await this.acquirePage();
     const { page } = worker;
 
-    // We use a shared queue approach: expose unique per-request callback names
-    // to avoid collisions between concurrent requests on different pages.
-    // Since pages are exclusive (one request per page from the pool), we can
-    // use fixed names per page — they are safe because the page isn't shared.
-    const startFnName = '__bb_responseStart';
-    const chunkFnName = '__bb_chunk';
-    const endFnName = '__bb_end';
-    const errorFnName = '__bb_error';
-
-    // Register callbacks (idempotent if already registered — puppeteer throws if re-registered,
-    // so we track registration state on the page object)
+    // Register callbacks once per page. Pages are pool-exclusive (one request at a time),
+    // so fixed function names are safe. Puppeteer throws if exposeFunction is called twice
+    // with the same name, so we guard with a flag on the page object.
     const pageAny = page as any;
     if (!pageAny.__bb_registered) {
-      await page.exposeFunction(startFnName, (status: number, headersJson: string) => {
+      await page.exposeFunction('__bb_responseStart', (status: number, headersJson: string) => {
         const headers = JSON.parse(headersJson) as Record<string, string>;
         pageAny.__bb_onStart?.(status, headers);
       });
-      await page.exposeFunction(chunkFnName, (base64Chunk: string) => {
+      await page.exposeFunction('__bb_chunk', (base64Chunk: string) => {
         const buffer = Buffer.from(base64Chunk, 'base64');
         pageAny.__bb_onChunk?.(buffer);
       });
-      await page.exposeFunction(endFnName, () => {
+      await page.exposeFunction('__bb_end', () => {
         pageAny.__bb_onEnd?.();
       });
-      await page.exposeFunction(errorFnName, (message: string) => {
+      await page.exposeFunction('__bb_error', (message: string) => {
         pageAny.__bb_onError?.(new Error(message));
       });
       pageAny.__bb_registered = true;
@@ -254,15 +261,19 @@ export class BrowserManager {
       pageAny.__bb_onEnd = undefined;
       pageAny.__bb_onError = undefined;
       this.releasePage(worker);
+      logFetch('done %s %s', opts.method, opts.url);
     }
   }
 
   async close(): Promise<void> {
     if (this.browser) {
+      log('closing browser');
       const b = this.browser;
       this.browser = null;
       this.pool = [];
-      await b.close().catch(() => {});
+      await b.close().catch(err => {
+        log('error closing browser: %O', err);
+      });
     }
   }
 }

@@ -1,4 +1,3 @@
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as https from 'node:https';
@@ -9,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket, WebSocketServer } from 'ws';
 import { BrowserManager } from '../src/browser';
 import { findChromeBrowser } from '../src/chrome/FindChrome';
-import { type BoomerProxy, startProxy } from '../src/proxy';
+import { BoomerProxy, startProxy } from '../src/proxy';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -44,10 +43,10 @@ function proxyRequest(opts: {
     const isHttps = parsed.protocol === 'https:';
 
     const doRequest = (socket?: net.Socket) => {
-      const path = parsed.pathname + (parsed.search ?? '');
+      const reqPath = parsed.pathname + (parsed.search ?? '');
       const reqOpts: http.RequestOptions = {
         method,
-        path,
+        path: reqPath,
         headers: {
           host: parsed.host,
           ...(body ? { 'content-length': Buffer.byteLength(body).toString() } : {}),
@@ -171,31 +170,27 @@ let wssTestServer: WebSocketServer;
 let httpTestPort: number;
 let httpsTestPort: number;
 let wsTestPort: number;
-let wssTestPort: number;
 let proxyPort: number;
 
 let browser: BrowserManager;
 let proxy: BoomerProxy;
 let chromePath: string;
 
-let selfSignedCaCert: Buffer;
 let testSslCaDir: string;
+let proxyCaCert: Buffer;
 
 beforeAll(async () => {
   // Find Chrome
-  chromePath = process.env.CHROME_PATH ?? (await findChromeBrowser()) ?? '';
+  chromePath = process.env.CHROME_PATH || (await findChromeBrowser()) || '';
   if (!chromePath) {
     throw new Error('No Chrome found. Set CHROME_PATH env var or install Chrome/Chromium.');
   }
 
-  // Generate self-signed cert for HTTPS test server (not the proxy CA)
-  // We use a pre-generated static cert for simplicity in tests
+  // Generate self-signed cert for the HTTPS test server
   const { key, cert } = generateSelfSignedCert();
-  selfSignedCaCert = Buffer.from(cert);
 
   // Allocate ports
-  [httpTestPort, httpsTestPort, wsTestPort, wssTestPort, proxyPort] = await Promise.all([
-    getFreePort(),
+  [httpTestPort, httpsTestPort, wsTestPort, proxyPort] = await Promise.all([
     getFreePort(),
     getFreePort(),
     getFreePort(),
@@ -206,7 +201,7 @@ beforeAll(async () => {
   httpTestServer = http.createServer(testRequestHandler);
   await new Promise<void>(r => httpTestServer.listen(httpTestPort, '127.0.0.1', r));
 
-  // HTTPS test server
+  // HTTPS test server (self-signed cert — proxy will MITM this)
   httpsTestServer = https.createServer({ key, cert }, testRequestHandler);
   await new Promise<void>(r => httpsTestServer.listen(httpsTestPort, '127.0.0.1', r));
 
@@ -216,7 +211,7 @@ beforeAll(async () => {
     ws.on('message', msg => ws.send(msg));
   });
 
-  // WSS echo server (reuse the https server)
+  // WSS echo server (shares the HTTPS server)
   wssTestServer = new WebSocketServer({ server: httpsTestServer });
   wssTestServer.on('connection', ws => {
     ws.on('message', msg => ws.send(msg));
@@ -240,6 +235,10 @@ beforeAll(async () => {
 
   // Wait a moment for proxy to fully initialize
   await new Promise(r => setTimeout(r, 500));
+
+  // Read the proxy-generated CA cert; HTTPS tests use it to verify the proxy's
+  // dynamically-signed per-host certificates.
+  proxyCaCert = fs.readFileSync(proxy.getCaCertPath());
 }, 120000);
 
 afterAll(async () => {
@@ -248,6 +247,7 @@ afterAll(async () => {
   await new Promise<void>(r => httpTestServer?.close(() => r()));
   await new Promise<void>(r => httpsTestServer?.close(() => r()));
   await new Promise<void>(r => wsTestServer?.close(() => r()));
+  wssTestServer?.close();
   // Clean up temp dir
   try {
     fs.rmSync(testSslCaDir, { recursive: true });
@@ -376,11 +376,11 @@ function testRequestHandler(req: http.IncomingMessage, res: http.ServerResponse)
 }
 
 // ---------------------------------------------------------------------------
-// Self-signed cert generation for test HTTPS server
+// Cert generation helpers
 // ---------------------------------------------------------------------------
 
+/** Self-signed server cert for the HTTPS test server (not a CA cert). */
 function generateSelfSignedCert(): { key: string; cert: string } {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const forge = require('node-forge') as typeof import('node-forge');
 
   const keys = forge.pki.rsa.generateKeyPair(2048);
@@ -408,7 +408,6 @@ function generateSelfSignedCert(): { key: string; cert: string } {
       ]
     }
   ]);
-
   cert.sign(keys.privateKey, forge.md.sha256.create());
 
   return {
@@ -498,9 +497,9 @@ describe('boomer-bypass E2E', () => {
   }, 60000);
 
   it('HTTP concurrent requests - 10 parallel', async () => {
-    const requests = Array.from({ length: 10 }, (_, i) =>
+    const requests = Array.from({ length: 10 }, () =>
       proxyRequest({
-        url: `http://127.0.0.1:${httpTestPort}/status/${200 + (i % 3 === 0 ? 0 : 0)}`,
+        url: `http://127.0.0.1:${httpTestPort}/status/200`,
         proxyHost: '127.0.0.1',
         proxyPort
       })
@@ -554,6 +553,48 @@ describe('boomer-bypass E2E', () => {
     });
 
     expect(result.status).toBe(502);
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// HTTPS MITM proxying — proxy intercepts TLS and re-signs with its own CA
+// ---------------------------------------------------------------------------
+
+describe('HTTPS MITM proxying', () => {
+  it('HTTPS GET through MITM proxy', async () => {
+    const result = await proxyRequest({
+      url: `https://127.0.0.1:${httpsTestPort}/ping`,
+      proxyHost: '127.0.0.1',
+      proxyPort,
+      caCert: proxyCaCert
+    });
+    expect(result.status).toBe(200);
+    expect(result.body).toBe('pong');
+  }, 30000);
+
+  it('HTTPS POST through MITM proxy', async () => {
+    const payload = 'https-post-body';
+    const result = await proxyRequest({
+      url: `https://127.0.0.1:${httpsTestPort}/body`,
+      method: 'POST',
+      body: payload,
+      proxyHost: '127.0.0.1',
+      proxyPort,
+      caCert: proxyCaCert
+    });
+    expect(result.status).toBe(200);
+    expect(result.body).toBe(payload);
+  }, 30000);
+
+  it('HTTPS response header forwarded through MITM proxy', async () => {
+    const result = await proxyRequest({
+      url: `https://127.0.0.1:${httpsTestPort}/custom-response-header`,
+      proxyHost: '127.0.0.1',
+      proxyPort,
+      caCert: proxyCaCert
+    });
+    expect(result.status).toBe(200);
+    expect(result.headers['x-custom-response']).toBe('boomer-value');
   }, 30000);
 });
 
@@ -826,7 +867,7 @@ describe('Verbose mode', () => {
 
 describe('Concurrency', () => {
   it('8 concurrent requests all complete (exceeds pool size of 4)', async () => {
-    const requests = Array.from({ length: 8 }, (_, i) =>
+    const requests = Array.from({ length: 8 }, () =>
       proxyRequest({
         url: `http://127.0.0.1:${httpTestPort}/status/${200}`,
         proxyHost: '127.0.0.1',
@@ -961,6 +1002,65 @@ describe('WebSocket additional', () => {
     });
 
     expect(received).toHaveLength(bigMsg.length);
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// Custom CA cert (caCert / caKey) — user-supplied certificate
+// ---------------------------------------------------------------------------
+
+describe('Custom CA cert', () => {
+  it('getCaCertPath returns the supplied caCert path', () => {
+    // getCaCertPath is a pure accessor — test it without starting the proxy.
+    const p = new BoomerProxy({
+      port: 0,
+      host: '127.0.0.1',
+      sslCaDir: os.tmpdir(),
+      browser,
+      caCert: '/custom/path/to/ca.pem',
+      caKey: '/custom/path/to/ca.key'
+    });
+    expect(p.getCaCertPath()).toBe('/custom/path/to/ca.pem');
+  }, 5000);
+
+  it('HTTPS proxying works with a user-supplied CA cert', async () => {
+    // Re-use the existing proxy's CA cert + key (already generated and known-good
+    // format for http-mitm-proxy) to verify that the caCert/caKey passthrough
+    // actually copies the files and the proxy uses them to MITM HTTPS correctly.
+    const existingCaCertPath = proxy.getCaCertPath();
+    const keysDir = existingCaCertPath
+      .replace('/certs/ca.pem', '/keys')
+      .replace(`${path.sep}certs${path.sep}ca.pem`, `${path.sep}keys`);
+    const existingCaKeyPath = path.join(keysDir, 'ca.private.key');
+    const existingCaPublicKeyPath = path.join(keysDir, 'ca.public.key');
+
+    const customSslCaDir = path.join(os.tmpdir(), `bb-custom-ca2-${Date.now()}`);
+    fs.mkdirSync(customSslCaDir, { recursive: true });
+
+    const customPort = await getFreePort();
+    const p = await startProxy({
+      port: customPort,
+      host: '127.0.0.1',
+      sslCaDir: customSslCaDir,
+      browser,
+      caCert: existingCaCertPath,
+      caKey: existingCaKeyPath,
+      caPublicKey: existingCaPublicKeyPath
+    });
+
+    // Both proxies share the same CA cert, so proxyCaCert still works for
+    // client-side TLS verification of the proxy's dynamically-signed host certs.
+    const result = await proxyRequest({
+      url: `https://127.0.0.1:${httpsTestPort}/ping`,
+      proxyHost: '127.0.0.1',
+      proxyPort: customPort,
+      caCert: proxyCaCert
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toBe('pong');
+    p.close();
+    fs.rmSync(customSslCaDir, { recursive: true });
   }, 30000);
 });
 

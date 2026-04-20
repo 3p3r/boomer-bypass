@@ -28,19 +28,20 @@
     "fix": "npm-run-all format lint:fix check:fix"
   },
   "pkg": {
-    "assets": ["dist/index.js", "node_modules/http-mitm-proxy/**/*"],
-    "targets": ["node18-linux-x64", "node18-macos-x64", "node18-win-x64"]
+    "assets": ["dist/index.js", "node_modules/http-mitm-proxy/**/*"]
   },
   "keywords": ["proxy", "mitm", "http", "https", "puppeteer", "browser"],
   "author": "boomer-bypass contributors",
   "license": "MIT",
   "dependencies": {
     "commander": "^12.1.0",
+    "debug": "^4.4.3",
     "http-mitm-proxy": "^1.1.0",
     "puppeteer-core": "^22.12.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
+    "@types/debug": "^4.1.13",
     "@types/node": "^20.19.0",
     "@types/node-forge": "^1.3.14",
     "@types/ws": "^8.5.13",

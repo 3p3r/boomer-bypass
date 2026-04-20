@@ -1060,7 +1060,7 @@ describe('Custom CA cert', () => {
     expect(result.status).toBe(200);
     expect(result.body).toBe('pong');
     p.close();
-    fs.rmSync(customSslCaDir, { recursive: true });
+    fs.rmSync(customSslCaDir, { recursive: true, maxRetries: 3, retryDelay: 100 });
   }, 30000);
 });
 

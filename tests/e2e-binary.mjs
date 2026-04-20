@@ -25,7 +25,7 @@ function detectBinaryPath() {
   if (platform === 'linux') {
     name = arch === 'arm64' ? 'bb-linux-arm64' : 'bb-linux-x64';
   } else if (platform === 'darwin') {
-    // prefer universal, fall back to arch-specific
+    // prefer universal wrapper, fall back to arch-specific
     if (fs.existsSync(path.join(buildDir, 'bb-mac'))) {
       name = 'bb-mac';
     } else {

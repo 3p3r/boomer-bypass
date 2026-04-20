@@ -55,17 +55,16 @@ for (const { target, output } of targetsToCompile) {
   await $`npx pkg dist/index.js --target ${target} --output build/${output} --compress GZip`;
 }
 
-// macOS universal binary via lipo (only on macOS with both arches compiled)
+// macOS universal binary: pkg binaries can't be combined with lipo (lipo strips
+// the pkg payload). Instead, build a self-extracting shell script that embeds
+// both arch binaries, detects the arch at runtime, and exec's the right one.
 if (platform === 'darwin') {
   const x64 = path.join(root, 'build', 'bb-mac-x64');
   const arm64 = path.join(root, 'build', 'bb-mac-arm64');
-  const universal = path.join(root, 'build', 'bb-mac');
-
   if (fs.existsSync(x64) && fs.existsSync(arm64)) {
-    console.log('[compile] Creating macOS universal binary via lipo...');
-    await $`lipo -create -output ${universal} ${x64} ${arm64}`;
-    await $`chmod +x ${universal}`;
-    console.log('[compile] Created build/bb-mac (universal)');
+    console.log('[compile] Creating macOS universal self-extracting wrapper...');
+    await createMacWrapper(root, x64, arm64);
+    console.log('[compile] Created build/bb-mac (universal self-extracting wrapper)');
   }
 }
 
@@ -78,6 +77,34 @@ if (fs.existsSync(linuxX64) && fs.existsSync(linuxArm64)) {
 }
 
 console.log('[compile] Done.');
+
+async function createMacWrapper(root: string, x64: string, arm64: string) {
+  const tarPath = path.join(root, 'build', 'bb-mac-bins.tar.gz');
+
+  await $`tar -czf ${tarPath} -C ${path.join(root, 'build')} bb-mac-x64 bb-mac-arm64`;
+
+  const tarB64 = fs.readFileSync(tarPath, 'base64');
+  fs.unlinkSync(tarPath);
+
+  const wrapper = `#!/bin/sh
+set -e
+ARCH=$(uname -m)
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+echo '${tarB64}' | base64 -d > "$TMP/bins.tar.gz"
+tar -xzf "$TMP/bins.tar.gz" -C "$TMP"
+
+if [ "$ARCH" = "arm64" ]; then
+  exec "$TMP/bb-mac-arm64" "$@"
+else
+  exec "$TMP/bb-mac-x64" "$@"
+fi
+`;
+
+  const wrapperPath = path.join(root, 'build', 'bb-mac');
+  fs.writeFileSync(wrapperPath, wrapper, { mode: 0o755 });
+}
 
 async function createLinuxWrapper(root: string, x64: string, arm64: string) {
   const tarPath = path.join(root, 'build', 'bb-linux-bins.tar.gz');

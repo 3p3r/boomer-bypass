@@ -1,0 +1,57 @@
+{
+  "name": "boomer-bypass",
+  "version": "0.1.0",
+  "description": "HTTP/HTTPS MITM proxy that routes traffic through your locally installed browser",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "bin": {
+    "bb": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "bundle": "tsx scripts/bundle.zx.mts",
+    "compile": "tsx scripts/compile.zx.mts",
+    "build": "npm-run-all bundle compile",
+    "start": "node dist/index.js",
+    "test": "npm-run-all test:vitest test:binary test:smoke",
+    "test:vitest": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "test:binary": "npm run build && node tests/e2e-binary.mjs",
+    "test:smoke": "bash tests/smoke.sh",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --write .",
+    "check": "biome check .",
+    "check:fix": "biome check --write .",
+    "fix": "npm-run-all format lint:fix check:fix"
+  },
+  "pkg": {
+    "assets": ["dist/index.js", "node_modules/http-mitm-proxy/**/*"],
+    "targets": ["node18-linux-x64", "node18-macos-x64", "node18-win-x64"]
+  },
+  "keywords": ["proxy", "mitm", "http", "https", "puppeteer", "browser"],
+  "author": "boomer-bypass contributors",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^12.1.0",
+    "http-mitm-proxy": "^1.1.0",
+    "puppeteer-core": "^22.12.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^20.19.0",
+    "@types/node-forge": "^1.3.14",
+    "@types/ws": "^8.5.13",
+    "@vitest/coverage-v8": "^2.0.0",
+    "esbuild": "^0.25.0",
+    "npm-run-all": "^4.1.5",
+    "pkg": "^5.8.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0",
+    "ws": "^8.18.0",
+    "zx": "^8.8.0"
+  }
+}

@@ -1,0 +1,248 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Nightly at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Build binaries (per-platform matrix)
+  # -------------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact: bb-linux-x64
+            platform_env: linux-x64
+          - os: ubuntu-22.04-arm
+            artifact: bb-linux-arm64
+            platform_env: linux-arm64
+          - os: windows-latest
+            artifact: bb-win-x64.exe
+            platform_env: win-x64
+          - os: macos-latest
+            artifact: bb-mac-x64
+            platform_env: mac-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Bundle
+        run: npm run bundle
+
+      - name: Compile binary
+        run: npm run compile
+        env:
+          ALL: '0'
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: build/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  # macOS arm64 cross-compile (macos-latest is x64, arm64 runners not available as standard)
+  build-mac-arm64:
+    name: Build (macos-arm64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Bundle
+        run: npm run bundle
+
+      - name: Compile macOS arm64
+        run: npx pkg dist/index.js --target node18-macos-arm64 --output build/bb-mac-arm64 --compress GZip
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bb-mac-arm64
+          path: build/bb-mac-arm64
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # E2E tests (per-platform)
+  # -------------------------------------------------------------------------
+  test-e2e:
+    name: E2E Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Chrome (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run E2E tests
+        run: npm test
+        env:
+          CHROME_PATH: ${{ runner.os == 'Linux' && '/usr/bin/google-chrome' || '' }}
+
+  # -------------------------------------------------------------------------
+  # Binary smoke tests (per-platform)
+  # -------------------------------------------------------------------------
+  test-binaries:
+    name: Binary Tests (${{ matrix.os }})
+    needs: [build, build-mac-arm64]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact: bb-linux-x64
+            binary: bb-linux-x64
+          - os: windows-latest
+            artifact: bb-win-x64.exe
+            binary: bb-win-x64.exe
+          - os: macos-latest
+            artifact: bb-mac-x64
+            binary: bb-mac-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: build/
+
+      - name: Make executable (Unix)
+        if: runner.os != 'Windows'
+        run: chmod +x build/${{ matrix.binary }}
+
+      - name: Run binary smoke tests
+        run: node tests/e2e-binary.mjs build/${{ matrix.binary }}
+
+  # -------------------------------------------------------------------------
+  # Release: assemble all artifacts and publish nightly draft
+  # -------------------------------------------------------------------------
+  publish-nightly:
+    name: Publish Nightly Draft
+    needs: [build, build-mac-arm64, test-e2e]
+    runs-on: macos-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create macOS universal binary
+        run: |
+          mkdir -p release/
+          lipo -create \
+            -output release/bb-mac \
+            artifacts/bb-mac-x64/bb-mac-x64 \
+            artifacts/bb-mac-arm64/bb-mac-arm64
+          chmod +x release/bb-mac
+
+      - name: Prepare Linux artifacts
+        run: |
+          cp artifacts/bb-linux-x64/bb-linux-x64 release/bb-linux-x64
+          cp artifacts/bb-linux-arm64/bb-linux-arm64 release/bb-linux-arm64
+          chmod +x release/bb-linux-x64 release/bb-linux-arm64
+
+          # Create self-extracting wrapper
+          cd release
+          tar -czf bb-linux-bins.tar.gz bb-linux-x64 bb-linux-arm64
+          TARB64=$(base64 < bb-linux-bins.tar.gz)
+          rm bb-linux-bins.tar.gz
+
+          cat > bb-linux << WRAPPER
+          #!/bin/sh
+          set -e
+          ARCH=\$(uname -m)
+          TMP=\$(mktemp -d)
+          trap 'rm -rf "\$TMP"' EXIT
+          echo '$TARB64' | base64 -d > "\$TMP/bins.tar.gz"
+          tar -xzf "\$TMP/bins.tar.gz" -C "\$TMP"
+          if [ "\$ARCH" = "x86_64" ]; then
+            exec "\$TMP/bb-linux-x64" "\$@"
+          elif [ "\$ARCH" = "aarch64" ] || [ "\$ARCH" = "arm64" ]; then
+            exec "\$TMP/bb-linux-arm64" "\$@"
+          else
+            echo "Unsupported architecture: \$ARCH" >&2
+            exit 1
+          fi
+          WRAPPER
+          chmod +x bb-linux
+          cd ..
+
+      - name: Prepare Windows artifact
+        run: cp artifacts/bb-win-x64.exe/bb-win-x64.exe release/bb-win.exe
+
+      - name: Get version
+        id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> $GITHUB_OUTPUT
+
+      - name: Create nightly draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="nightly-$(date +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" \
+            --draft \
+            --title "Nightly build v${{ steps.version.outputs.version }} ($(date +%Y-%m-%d))" \
+            --notes "Automated nightly build from commit ${{ github.sha }}" \
+            release/bb-mac \
+            release/bb-linux \
+            release/bb-win.exe

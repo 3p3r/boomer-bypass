@@ -1,0 +1,24 @@
+node_modules/
+dist/
+build/
+coverage/
+*.log
+.env
+.env.local
+
+# MITM proxy cert cache
+.http-mitm-proxy/
+.boomer-bypass/
+
+# pkg cache
+.pkg-cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~

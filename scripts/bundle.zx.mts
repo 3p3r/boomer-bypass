@@ -8,7 +8,6 @@ const root = path.resolve(__dirname, '..');
 
 cd(root);
 
-// Ensure dist directory exists
 fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
 
 console.log('[bundle] Bundling src/index.ts → dist/index.js with esbuild...');
@@ -26,12 +25,6 @@ await $`npx esbuild \
 
 console.log('[bundle] Done.');
 
-// Verify output exists
 const outFile = path.join(root, 'dist', 'index.js');
-if (!fs.existsSync(outFile)) {
-  console.error('[bundle] ERROR: dist/index.js was not created!');
-  process.exit(1);
-}
-
 const size = fs.statSync(outFile).size;
 console.log(`[bundle] dist/index.js: ${(size / 1024).toFixed(1)} KB`);

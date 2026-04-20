@@ -9,7 +9,6 @@ const root = path.resolve(__dirname, '..');
 
 cd(root);
 
-// Ensure build directory exists
 fs.mkdirSync(path.join(root, 'build'), { recursive: true });
 
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf-8'));
@@ -29,8 +28,6 @@ const targets = [
 const platform = os.platform();
 const arch = os.arch();
 
-// In CI, we compile for all targets on corresponding runners.
-// Locally, just compile for the current platform by default unless ALL=1.
 const compileAll = process.env.ALL === '1';
 
 let targetsToCompile = targets;
@@ -50,14 +47,9 @@ if (!compileAll) {
 
 for (const { target, output } of targetsToCompile) {
   console.log(`[compile] ${target} → build/${output}`);
-  // Use a relative path to avoid backslash-in-template-string issues on Windows.
-  // cd(root) above ensures the CWD is always the repo root.
   await $`npx pkg dist/index.js --target ${target} --output build/${output} --compress GZip`;
 }
 
-// macOS universal binary: pkg binaries can't be combined with lipo (lipo strips
-// the pkg payload). Instead, build a self-extracting shell script that embeds
-// both arch binaries, detects the arch at runtime, and exec's the right one.
 if (platform === 'darwin') {
   const x64 = path.join(root, 'build', 'bb-mac-x64');
   const arm64 = path.join(root, 'build', 'bb-mac-arm64');
@@ -68,7 +60,6 @@ if (platform === 'darwin') {
   }
 }
 
-// Linux self-extracting wrapper (only if both Linux binaries present)
 const linuxX64 = path.join(root, 'build', 'bb-linux-x64');
 const linuxArm64 = path.join(root, 'build', 'bb-linux-arm64');
 if (fs.existsSync(linuxX64) && fs.existsSync(linuxArm64)) {
@@ -109,7 +100,6 @@ fi
 async function createLinuxWrapper(root: string, x64: string, arm64: string) {
   const tarPath = path.join(root, 'build', 'bb-linux-bins.tar.gz');
 
-  // Pack both binaries into a tarball
   await $`tar -czf ${tarPath} -C ${path.join(root, 'build')} bb-linux-x64 bb-linux-arm64`;
 
   const tarB64 = fs.readFileSync(tarPath, 'base64');
@@ -121,7 +111,6 @@ ARCH=$(uname -m)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# Decode embedded tarball
 echo '${tarB64}' | base64 -d > "$TMP/bins.tar.gz"
 tar -xzf "$TMP/bins.tar.gz" -C "$TMP"
 

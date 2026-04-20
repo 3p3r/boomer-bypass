@@ -31,7 +31,7 @@ jobs:
           - os: windows-latest
             artifact: bb-win-x64.exe
             platform_env: win-x64
-          - os: macos-latest
+          - os: macos-13
             artifact: bb-mac-x64
             platform_env: mac-x64
 
@@ -62,7 +62,7 @@ jobs:
           path: build/${{ matrix.artifact }}
           if-no-files-found: error
 
-  # macOS arm64 cross-compile (macos-latest is x64, arm64 runners not available as standard)
+  # macOS arm64 (macos-latest is arm64 / Apple Silicon)
   build-mac-arm64:
     name: Build (macos-arm64)
     runs-on: macos-latest
@@ -144,9 +144,12 @@ jobs:
           - os: windows-latest
             artifact: bb-win-x64.exe
             binary: bb-win-x64.exe
-          - os: macos-latest
+          - os: macos-13
             artifact: bb-mac-x64
             binary: bb-mac-x64
+          - os: macos-latest
+            artifact: bb-mac-arm64
+            binary: bb-mac-arm64
 
     steps:
       - uses: actions/checkout@v4

@@ -55,7 +55,6 @@ async function main() {
     process.exit(1);
   }
 
-  // Find Chrome
   let chromePath = opts.chromePath;
   if (!chromePath) {
     log('searching for Chrome/Chromium...');
@@ -73,17 +72,14 @@ async function main() {
 
   log('using Chrome at %s', chromePath);
 
-  // Launch browser
   const browser = new BrowserManager(chromePath, opts.headless !== false);
   await browser.launch();
 
-  // Validate custom CA cert/key — both must be provided together
   if (!!opts.caCert !== !!opts.caKey) {
     process.stderr.write('[boomer] --ca-cert and --ca-key must be provided together.\n');
     process.exit(1);
   }
 
-  // Start proxy
   const sslCaDir = opts.sslCaDir;
   const proxy = await startProxy({
     port,
@@ -113,7 +109,6 @@ async function main() {
     '[boomer] Configure your browser/app to use this proxy, then browse normally.\n'
   );
 
-  // Graceful shutdown
   const shutdown = async () => {
     process.stdout.write('\n[boomer] Shutting down...\n');
     log('shutdown signal received');

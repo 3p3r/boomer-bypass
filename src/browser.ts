@@ -21,7 +21,7 @@ interface WorkerPage {
 }
 
 const POOL_SIZE = 4;
-const CHUNK_SIZE = 65536; // 64KB
+const CHUNK_SIZE = 65536;
 
 export class BrowserManager {
   private browser: puppeteer.Browser | null = null;
@@ -50,7 +50,6 @@ export class BrowserManager {
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
-          // Trust self-signed certs on localhost — common for local dev HTTPS servers
           '--allow-insecure-localhost'
         ]
       });
@@ -80,11 +79,7 @@ export class BrowserManager {
   private async createWorkerPage(): Promise<void> {
     if (!this.browser) return;
     const page = await this.browser.newPage();
-
-    // Navigate to blank
     await page.goto('about:blank');
-
-    // Suppress console noise from worker pages in non-debug mode
     page.on('console', msg => logPool('page console [%s] %s', msg.type(), msg.text()));
     page.on('pageerror', err => logPool('page error: %O', err));
 
@@ -93,7 +88,6 @@ export class BrowserManager {
   }
 
   private async acquirePage(): Promise<WorkerPage> {
-    // Wait for browser to be ready
     while (this.launching) {
       logPool('waiting for browser launch...');
       await new Promise<void>(resolve => {
@@ -101,7 +95,6 @@ export class BrowserManager {
       });
     }
 
-    // Find a free page
     const free = this.pool.find(p => !p.busy);
     if (free) {
       free.busy = true;
@@ -109,7 +102,6 @@ export class BrowserManager {
       return free;
     }
 
-    // All pages busy — wait for one to become free
     logPool('all %d pages busy — queuing', this.pool.length);
     return new Promise(resolve => {
       const check = () => {
@@ -135,9 +127,6 @@ export class BrowserManager {
     const worker = await this.acquirePage();
     const { page } = worker;
 
-    // Register callbacks once per page. Pages are pool-exclusive (one request at a time),
-    // so fixed function names are safe. Puppeteer throws if exposeFunction is called twice
-    // with the same name, so we guard with a flag on the page object.
     const pageAny = page as any;
     if (!pageAny.__bb_registered) {
       await page.exposeFunction('__bb_responseStart', (status: number, headersJson: string) => {
@@ -157,7 +146,6 @@ export class BrowserManager {
       pageAny.__bb_registered = true;
     }
 
-    // Wire up callbacks for this specific request
     pageAny.__bb_onStart = onStart;
     pageAny.__bb_onChunk = onChunk;
 
@@ -165,8 +153,6 @@ export class BrowserManager {
       pageAny.__bb_onEnd = resolve;
       pageAny.__bb_onError = reject;
     });
-    // Attach a no-op catch so Node/vitest don't report an unhandled rejection if
-    // the error arrives before we reach `await endPromise` below.
     endPromise.catch(() => {});
 
     try {
@@ -191,12 +177,10 @@ export class BrowserManager {
             const init: RequestInit = {
               method: fetchMethod,
               headers: fetchHeaders,
-              // Needed so fetch doesn't follow redirects opaquely
               redirect: 'follow'
             };
 
             if (fetchBodyBase64) {
-              // Decode base64 body
               const binaryStr = atob(fetchBodyBase64);
               const bytes = new Uint8Array(binaryStr.length);
               for (let i = 0; i < binaryStr.length; i++) {
@@ -207,7 +191,6 @@ export class BrowserManager {
 
             const response = await fetch(fetchUrl, init);
 
-            // Collect headers
             const responseHeaders: Record<string, string> = {};
             response.headers.forEach((value, key) => {
               responseHeaders[key] = value;
@@ -230,7 +213,6 @@ export class BrowserManager {
               let offset = 0;
               while (offset < value.byteLength) {
                 const slice = value.slice(offset, offset + fetchChunkSize);
-                // Convert Uint8Array to base64 string
                 let binary = '';
                 for (let i = 0; i < slice.byteLength; i++) {
                   binary += String.fromCharCode(slice[i]);

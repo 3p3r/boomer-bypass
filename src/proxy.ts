@@ -14,11 +14,8 @@ export interface ProxyOptions {
   sslCaDir: string;
   browser: BrowserManager;
   verbose?: boolean;
-  /** Path to an existing PEM-encoded CA certificate file. */
   caCert?: string;
-  /** Path to the matching PEM CA private key file. */
   caKey?: string;
-  /** Path to the matching PEM CA public key file. Derived from caKey path if omitted. */
   caPublicKey?: string;
 }
 
@@ -35,10 +32,6 @@ export class BoomerProxy {
     const { port, host, sslCaDir, browser, verbose, caCert, caKey, caPublicKey } = this.opts;
     log('starting proxy on %s:%d (sslCaDir=%s)', host, port, sslCaDir);
 
-    // If the user supplied their own CA cert + key, install them into sslCaDir
-    // before the proxy starts — http-mitm-proxy checks for existing files and
-    // skips generation when they are already present.
-    // Note: http-mitm-proxy requires all three files: ca.pem, ca.private.key, ca.public.key.
     if (caCert && caKey) {
       log('installing custom CA cert from %s', caCert);
       const certsDir = path.join(sslCaDir, 'certs');
@@ -47,7 +40,6 @@ export class BoomerProxy {
       fs.mkdirSync(keysDir, { recursive: true });
       fs.copyFileSync(caCert, path.join(certsDir, 'ca.pem'));
       fs.copyFileSync(caKey, path.join(keysDir, 'ca.private.key'));
-      // Derive public key path from private key path if not explicitly provided
       const publicKeyPath = caPublicKey ?? caKey.replace('ca.private.key', 'ca.public.key');
       fs.copyFileSync(publicKeyPath, path.join(keysDir, 'ca.public.key'));
     }
@@ -77,7 +69,6 @@ export class BoomerProxy {
       const host = req.headers['host'] ?? '';
       const reqUrl = req.url ?? '/';
 
-      // Build full URL
       let fullUrl: string;
       if (reqUrl.startsWith('http://') || reqUrl.startsWith('https://')) {
         /* c8 ignore next */
@@ -92,7 +83,6 @@ export class BoomerProxy {
         process.stdout.write(`[boomer] ${req.method} ${fullUrl}\n`);
       }
 
-      // Collect request body
       const bodyChunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => {
         bodyChunks.push(chunk);
@@ -101,7 +91,6 @@ export class BoomerProxy {
       req.on('end', () => {
         const body = bodyChunks.length > 0 ? Buffer.concat(bodyChunks) : undefined;
 
-        // Build headers — filter out proxy-specific headers
         const headers: Record<string, string> = {};
         for (const [key, value] of Object.entries(req.headers)) {
           if (
@@ -127,7 +116,6 @@ export class BoomerProxy {
               body
             },
             (status, responseHeaders) => {
-              // Remove transfer-encoding since we're reconstructing the response
               const cleanHeaders: Record<string, string> = {};
               for (const [k, v] of Object.entries(responseHeaders)) {
                 if (k.toLowerCase() === 'transfer-encoding') continue;
@@ -185,11 +173,7 @@ export class BoomerProxy {
         }
       });
 
-      // The proxy pauses clientToProxyRequest before calling onRequest.
-      // Since we never call callback(), we must resume the stream ourselves.
       req.resume();
-
-      // Do NOT call callback() — we handle the response ourselves
     });
 
     this.proxy.onWebSocketConnection((ctx, callback) => {
@@ -235,16 +219,11 @@ export class BoomerProxy {
       log('closing proxy');
       this.proxy.close();
     } catch (err) {
-      // http-mitm-proxy lazily initializes its SSL server on the first HTTPS
-      // connection. If close() is called before any HTTPS traffic, the internal
-      // SSL server is undefined and close() would throw — ignore that.
       log('error during proxy.close() (likely no HTTPS traffic yet): %O', err);
     }
   }
 
   getCaCertPath(): string {
-    // If the user supplied their own cert, report its original path so the
-    // printed trust instructions point to the right file.
     return this.opts.caCert ?? `${this.opts.sslCaDir}/certs/ca.pem`;
   }
 }
